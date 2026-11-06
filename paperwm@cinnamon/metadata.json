@@ -1,0 +1,13 @@
+{
+    "uuid": "paperwm@cinnamon",
+    "name": "PaperWM for Cinnamon",
+    "description": "Scrollable tiling: windows sit side by side in a horizontal strip per workspace and monitor. Focus scrolls the strip.",
+    "version": "0.1",
+    "cinnamon-version": [
+        "6.0",
+        "6.2",
+        "6.4",
+        "6.6"
+    ],
+    "url": "https://github.com/merlinz01/paperwm-cinnamon"
+}
