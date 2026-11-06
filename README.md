@@ -54,9 +54,17 @@ and direction are in the extension settings.
 
 ## Install
 
+Download `paperwm@merlinz01.zip` from the [latest release](https://github.com/merlinz01/paperwm-cinnamon/releases/latest), then:
+
+    unzip paperwm@merlinz01.zip -d ~/.local/share/cinnamon/extensions/
+
+Then enable **PaperWM for Cinnamon** in System Settings → Extensions. To update, download the new zip, delete the old folder, unzip again, and re-enable the extension (or log out and back in).
+
+Or, to track the code with git:
+
     git clone https://github.com/merlinz01/paperwm-cinnamon.git
     cd paperwm-cinnamon
-    ln -s "$PWD/paperwm@cinnamon" ~/.local/share/cinnamon/extensions/
+    ln -s "$PWD/paperwm@merlinz01" ~/.local/share/cinnamon/extensions/
 
 Then enable **PaperWM for Cinnamon** in System Settings → Extensions.
 
@@ -65,9 +73,11 @@ Gesture support needs touchegg, which Linux Mint ships and enables by default.
 
 ## Development
 
-For debugging, the live instance is `imports.misc.fileUtils.getModuleByIndex(imports.ui.extension.getExtension('paperwm@cinnamon').moduleIndex).getTiler()` in Looking Glass.
+To make a release, bump `version` in `paperwm@merlinz01/metadata.json`, commit, then tag and push (e.g. `git tag v0.2 && git push origin v0.2`). The release workflow builds the zip and fails if the tag doesn't match the version.
 
-To reload after editing: `gdbus call --session --dest org.Cinnamon --object-path /org/Cinnamon --method org.Cinnamon.ReloadXlet paperwm@cinnamon EXTENSION`
+For debugging, the live instance is `imports.misc.fileUtils.getModuleByIndex(imports.ui.extension.getExtension('paperwm@merlinz01').moduleIndex).getTiler()` in Looking Glass.
+
+To reload after editing: `gdbus call --session --dest org.Cinnamon --object-path /org/Cinnamon --method org.Cinnamon.ReloadXlet paperwm@merlinz01 EXTENSION`
 
 ## Limitations
 

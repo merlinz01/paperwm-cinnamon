@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      UUID: paperwm@merlinz01
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches metadata.json version
+        run: |
+          version=$(jq -r .version "$UUID/metadata.json")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match metadata.json version $version"
+            exit 1
+          fi
+
+      - name: Build zip
+        run: zip -r "$UUID.zip" "$UUID"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$UUID.zip" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Unzip into \`~/.local/share/cinnamon/extensions/\`, then enable **PaperWM for Cinnamon** in System Settings → Extensions.
+
+          This project is AI-generated; see the README."
