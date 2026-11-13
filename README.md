@@ -29,6 +29,10 @@ It is unrelated to the PaperWM project for GNOME Shell and shares no code with i
 - If an app resizes itself, the extension puts it back to its strip width.
   If the app keeps doing it, the extension uses the app's width instead.
 - Dialogs, sticky windows, and fullscreen windows float.
+- While you scroll (swipe or shortcut), a minimap of the strip appears in the
+  middle of the screen with live thumbnails, the focused window ringed and the
+  visible area outlined. It fades out when the swipe settles or when you
+  release the modifier keys. It can be turned off in the extension settings.
 
 ## Keys (change them in System Settings → Extensions → PaperWM for Cinnamon → Configure)
 

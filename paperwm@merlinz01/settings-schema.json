@@ -38,6 +38,12 @@
         "description": "Animation duration",
         "dependency": "animate"
     },
+    "show-minimap": {
+        "type": "switch",
+        "default": true,
+        "description": "Show window overview while scrolling",
+        "tooltip": "A strip of window thumbnails, shown during swipes and while holding a shortcut's modifier keys."
+    },
     "keys-section": {
         "type": "section",
         "description": "Keyboard shortcuts"

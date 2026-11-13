@@ -7,6 +7,7 @@
 const Clutter = imports.gi.Clutter;
 const GLib = imports.gi.GLib;
 const Meta = imports.gi.Meta;
+const St = imports.gi.St;
 const Main = imports.ui.main;
 const Settings = imports.ui.settings;
 const { GestureType, GestureDirection } = imports.ui.gestures.ToucheggTypes;
@@ -16,6 +17,14 @@ const MIN_FRAC = 0.1;
 const OVERSCROLL_RESISTANCE = 0.3;
 const MOMENTUM_MS = 250;
 const VELOCITY_WINDOW_MS = 100;
+const MINIMAP_HEIGHT = 0.15;      // thumbnail height as a fraction of the monitor
+const MINIMAP_MAX_WIDTH = 0.9;    // of the monitor width
+const MINIMAP_PADDING = 12;
+const MINIMAP_LINGER_MS = 400;    // after a swipe settles
+const MINIMAP_FADE_MS = 150;
+const MODIFIER_POLL_MS = 50;
+const HELD_MODIFIERS = Clutter.ModifierType.SHIFT_MASK | Clutter.ModifierType.CONTROL_MASK |
+    Clutter.ModifierType.MOD1_MASK | Clutter.ModifierType.MOD4_MASK | Clutter.ModifierType.SUPER_MASK;
 
 const KEY_ACTIONS = {
     'key-focus-left': t => t.focusNeighbor(-1),
@@ -29,6 +38,8 @@ const KEY_ACTIONS = {
     'key-center': t => t.centerFocused(),
     'key-toggle-float': t => t.toggleFloat(),
 };
+// Actions that leave the window in its strip, so the minimap is worth showing.
+const MINIMAP_KEYS = new Set(Object.keys(KEY_ACTIONS).filter(k => k !== 'key-toggle-float'));
 
 let extensionMeta = null;
 let tiler = null;
@@ -40,6 +51,189 @@ class Strip {
         this.windows = [];
         this.scroll = 0;
         this.lastFocus = null;
+    }
+}
+
+// Overview of one strip: live thumbnails in strip order, a ring around the
+// focused window, and an outline of the part of the strip that's on screen.
+class Minimap {
+    constructor(tiler) {
+        this._tiler = tiler;
+        this.strip = null;
+        this._items = new Map();   // Meta.Window -> { box, clone }
+        this._hideTimer = 0;
+        this._pollTimer = 0;
+
+        this.actor = new St.Widget({
+            style: 'background-color: rgba(24, 24, 24, 0.85); border-radius: 12px;',
+            clip_to_allocation: true,
+            reactive: false,
+            visible: false,
+            opacity: 0,
+        });
+        this._inner = new St.Widget();
+        this.actor.add_child(this._inner);
+        this._viewport = new St.Widget({
+            style: 'border: 2px solid rgba(255, 255, 255, 0.45); border-radius: 6px;',
+        });
+        this._ring = new St.Widget({
+            style: 'border: 3px solid rgba(120, 170, 255, 0.95); border-radius: 6px;',
+        });
+        this._inner.add_child(this._viewport);
+        this._inner.add_child(this._ring);
+        Main.uiGroup.add_child(this.actor);
+    }
+
+    destroy() {
+        this._clearTimers();
+        this._clearItems();
+        this.actor.destroy();
+    }
+
+    get visible() {
+        return this.actor.visible && this.strip !== null;
+    }
+
+    show(strip) {
+        this._clearTimers();
+        if (strip !== this.strip) {
+            this._clearItems();
+            this.strip = strip;
+        }
+        this.actor.remove_all_transitions();
+        this.actor.visible = true;
+        this.sync(strip, false);
+        this.actor.ease({ opacity: 255, duration: MINIMAP_FADE_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+    }
+
+    // Hide once every modifier key is released, like Alt-Tab.
+    hideOnModifierRelease() {
+        this._clearTimers();
+        this._pollTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MODIFIER_POLL_MS, () => {
+            const [, , mods] = global.get_pointer();
+            if (mods & HELD_MODIFIERS)
+                return GLib.SOURCE_CONTINUE;
+            this._pollTimer = 0;
+            this.hide();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    hideAfter(ms) {
+        this._clearTimers();
+        this._hideTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+            this._hideTimer = 0;
+            this.hide();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    hide() {
+        this._clearTimers();
+        if (!this.actor.visible)
+            return;
+        this.actor.remove_all_transitions();
+        this.actor.ease({
+            opacity: 0,
+            duration: MINIMAP_FADE_MS,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            onComplete: () => {
+                this.actor.visible = false;
+                this._clearItems();
+                this.strip = null;
+            },
+        });
+    }
+
+    sync(strip, animate) {
+        if (strip !== this.strip || !this.actor.visible)
+            return;
+        const tiler = this._tiler;
+        const { area, result, total } = tiler._positions(strip);
+        const geo = global.display.get_monitor_geometry(strip.monitor);
+        const thumbH = Math.round(geo.height * MINIMAP_HEIGHT);
+        const scale = thumbH / area.height;
+        const pad = MINIMAP_PADDING;
+        const set = (actor, props) => {
+            actor.remove_all_transitions();
+            if (animate)
+                actor.ease(Object.assign({ duration: tiler.animationTime, mode: Clutter.AnimationMode.EASE_OUT_QUAD }, props));
+            else
+                actor.set(props);
+        };
+
+        const focus = global.display.focus_window;
+        const seen = new Set();
+        let ringRect = null;
+        for (const { w, x, width } of result) {
+            const item = this._items.get(w) || this._makeItem(w);
+            if (!item)
+                continue;
+            seen.add(w);
+            const frame = w.get_frame_rect(), buffer = w.get_buffer_rect();
+            const rect = { x: Math.round(x * scale), y: 0, width: Math.max(1, Math.round(width * scale)), height: thumbH };
+            set(item.box, rect);
+            // Clone the whole actor but crop away its shadow so the frame fills the box.
+            item.clone.set_scale(scale, scale);
+            item.clone.set_position(Math.round((buffer.x - frame.x) * scale), Math.round((buffer.y - frame.y) * scale));
+            if (w === focus)
+                ringRect = rect;
+        }
+        for (const [w, item] of this._items) {
+            if (!seen.has(w)) {
+                item.box.destroy();
+                this._items.delete(w);
+            }
+        }
+
+        this._ring.visible = ringRect !== null;
+        if (ringRect)
+            set(this._ring, ringRect);
+        set(this._viewport, { x: Math.round(strip.scroll * scale), y: 0, width: Math.round(area.width * scale), height: thumbH });
+        this._inner.set_child_above_sibling(this._viewport, null);
+        this._inner.set_child_above_sibling(this._ring, null);
+
+        // Size to the strip, up to most of the monitor; past that, keep the
+        // visible part of the strip centred.
+        const contentW = Math.round(total * scale);
+        const innerW = Math.min(contentW, Math.round(geo.width * MINIMAP_MAX_WIDTH) - 2 * pad);
+        let offset;
+        if (contentW <= innerW)
+            offset = 0;
+        else
+            offset = clamp(innerW / 2 - (strip.scroll + area.width / 2) * scale, innerW - contentW, 0);
+        set(this._inner, { x: pad + Math.round(offset), y: pad });
+        const boxW = innerW + 2 * pad, boxH = thumbH + 2 * pad;
+        // Not via set(): that would cancel the fade in/out on this actor.
+        this.actor.set_position(geo.x + Math.round((geo.width - boxW) / 2), geo.y + Math.round((geo.height - boxH) / 2));
+        this.actor.set_size(boxW, boxH);
+    }
+
+    _makeItem(w) {
+        const source = w.get_compositor_private();
+        if (!source)
+            return null;
+        const box = new St.Widget({ clip_to_allocation: true, style: 'border-radius: 6px;' });
+        const clone = new Clutter.Clone({ source });
+        box.add_child(clone);
+        this._inner.add_child(box);
+        const item = { box, clone };
+        this._items.set(w, item);
+        return item;
+    }
+
+    _clearItems() {
+        for (const item of this._items.values())
+            item.box.destroy();
+        this._items.clear();
+    }
+
+    _clearTimers() {
+        if (this._hideTimer)
+            GLib.source_remove(this._hideTimer);
+        if (this._pollTimer)
+            GLib.source_remove(this._pollTimer);
+        this._hideTimer = this._pollTimer = 0;
     }
 }
 
@@ -65,6 +259,8 @@ class Tiler {
         this.settings.bind('gesture-fingers', 'gestureFingers');
         this.settings.bind('gesture-speed', 'gestureSpeed');
         this.settings.bind('gesture-natural', 'gestureNatural');
+        this.settings.bind('show-minimap', 'showMinimap', () => this._minimap.hide());
+        this._minimap = new Minimap(this);
         this._swipe = null;
         this._gestureClient = null;
         this._gestureIds = [];
@@ -91,6 +287,7 @@ class Tiler {
     destroy() {
         this._unbindKeys();
         this._teardownGestures();
+        this._minimap.destroy();
         for (const [obj, id] of this._signals)
             obj.disconnect(id);
         this._signals = [];
@@ -147,7 +344,11 @@ class Tiler {
             if (!binding)
                 continue;
             const name = `paperwm-cinnamon-${key}`;
-            Main.keybindingManager.addHotKey(name, binding, () => action(this));
+            Main.keybindingManager.addHotKey(name, binding, () => {
+                action(this);
+                if (MINIMAP_KEYS.has(key))
+                    this._flashMinimap();
+            });
             this._boundKeys.push(name);
         }
     }
@@ -368,6 +569,8 @@ class Tiler {
         st.strip.lastFocus = w;
         if (this._ensureVisible(st.strip, w))
             this.layout(st.strip, animate);
+        else
+            this._minimap.sync(st.strip, animate && this.animate);
     }
 
     _onGrabBegin(w, op) {
@@ -608,6 +811,7 @@ class Tiler {
         } finally {
             this._busy--;
         }
+        this._minimap.sync(strip, doAnimate);
     }
 
     _overlapsOtherMonitor(x, y, width, height, monitor) {
@@ -703,6 +907,8 @@ class Tiler {
             pxPerPercent: area.width * this.gestureSpeed / 100,
             samples: [],
         };
+        if (this.showMinimap)
+            this._minimap.show(strip);
         this._onGestureUpdate(type, direction, percentage, fingers, device, time);
     }
 
@@ -754,12 +960,15 @@ class Tiler {
         this.layout(strip);
         if (target && target !== global.display.focus_window)
             target.activate(global.get_current_time());
+        if (this._minimap.strip === strip)
+            this._minimap.hideAfter(this.animationTime + MINIMAP_LINGER_MS);
     }
 
     _cancelSwipe() {
         const strip = this._swipe.strip;
         this._swipe = null;
         this.layout(strip, false);
+        this._minimap.hide();
     }
 
     // Shift window actors to where the strip would put them, without moving
@@ -773,6 +982,21 @@ class Tiler {
             actor.remove_all_transitions();
             actor.translation_x = area.x + x - strip.scroll - w.get_frame_rect().x;
         }
+        this._minimap.sync(strip, false);
+    }
+
+    // ---- minimap -----------------------------------------------------------------
+
+    // Shown by keyboard actions until the modifiers are released.
+    _flashMinimap() {
+        if (!this.showMinimap)
+            return;
+        const f = this._focusedTiled();
+        const strip = f ? f.strip : this._currentStrip();
+        if (!strip.windows.some(w => !this._isSkipped(w)))
+            return;
+        this._minimap.show(strip);
+        this._minimap.hideOnModifierRelease();
     }
 
     // ---- actions ----------------------------------------------------------------
